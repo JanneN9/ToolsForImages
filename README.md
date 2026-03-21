@@ -1,5 +1,7 @@
 # ToolsForImages
 
+Codes made by Claude
+
 1) Remove duplicate
    - download several web pages from Civitai
    - result will single instance of upload images
