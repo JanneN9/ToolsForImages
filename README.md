@@ -8,7 +8,7 @@ Codes made by Claude
   
 2) Image matcher
    - folder of small thumbnails
-   - search orinals from folders
+   - search originals from folders
   
 3) Sorting generated images
    - publish, save, delete, ...
