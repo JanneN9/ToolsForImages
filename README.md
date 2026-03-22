@@ -29,6 +29,7 @@ Example:
 <img width="1434" height="908" alt="image" src="https://github.com/user-attachments/assets/3f854849-97c9-4c53-ae89-fd096921f434" />
 
 Moving found to same level as original thumbs: /source/Thumbnails/
+
 <img width="399" height="150" alt="image" src="https://github.com/user-attachments/assets/aea5db97-33be-4aad-a84d-d58ef2023206" />
 
   
