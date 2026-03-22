@@ -28,13 +28,8 @@ Example:
   
 <img width="1434" height="908" alt="image" src="https://github.com/user-attachments/assets/3f854849-97c9-4c53-ae89-fd096921f434" />
 
-/source/thumbsnails/
-├── P/              ← Thumbnails folder
-│   ├── 001.webp   ← unmatched, stays here
-│   └── ...
-└── founded/        ← created automatically
-    ├── 003.webp   ← was matched, moved here
-    └── ...
+<img width="399" height="150" alt="image" src="https://github.com/user-attachments/assets/aea5db97-33be-4aad-a84d-d58ef2023206" />
+
   
 3) Sorting generated images
    - publish, save, delete, ...
