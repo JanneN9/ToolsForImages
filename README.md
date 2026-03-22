@@ -25,6 +25,9 @@ Example:
    - folder of small thumbnails
    - search originals from folders
   
+<img width="1434" height="908" alt="image" src="https://github.com/user-attachments/assets/3f854849-97c9-4c53-ae89-fd096921f434" />
+
+  
 3) Sorting generated images
    - publish, save, delete, ...
   
