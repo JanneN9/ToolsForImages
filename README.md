@@ -38,6 +38,9 @@ Example:
   
 3) Sorting generated images
    - publish, save, delete, ...
+   - 
+<img width="1244" height="834" alt="image" src="https://github.com/user-attachments/assets/98c7bdb8-76a5-406c-8280-4805f0c867ad" />
+
   
 Pair detection — scans the source folder and matches files by removing Own / Pub from the stem (e.g. MyArt_Own_001.png + MyArt_Pub_001.png → key MyArt_001). Each pair shows both thumbnails side-by-side with ✓/✗ indicators for which files exist.
 
