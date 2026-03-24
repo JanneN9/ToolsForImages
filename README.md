@@ -35,7 +35,10 @@ Moving found to same level as original thumbs: /source/Thumbnails/
   
 3) Sorting generated images
    - publish, save, delete, ...
-   - 
+   - python image_sorter.py                        # normal paired Own/Pub mode
+   - python image_sorter.py --all                  # every image, no pairing
+   - python image_sorter.py --all /path/to/folder  # open folder directly too
+     
 <img width="1244" height="834" alt="image" src="https://github.com/user-attachments/assets/98c7bdb8-76a5-406c-8280-4805f0c867ad" />
 
   
