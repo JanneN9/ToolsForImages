@@ -9,26 +9,37 @@ Naming convention
   *Own*.png  — the "own/private" version  (higher quality / unprocessed)
   *Pub*.png  — the "published" version    (posted online)
 
-Pairing strategy
+Pairing strategy (default mode)
   Files are paired by perceptual hash (pHash) similarity, NOT by filename
   numbers.  This handles cases where Own/Pub counters have drifted apart.
   A threshold slider in the toolbar controls how loose the matching is.
   Unmatched files are shown at the end with a warning border.
 
-Actions (buttons on every card)
-  [Save]    — move Own  → Save/,    delete Pub
-  [Civit]   — move Pub  → Civit/,   also move Own → Save/
-  [Improve] — move Own  → Improve/, delete Pub
-  [Maybe]   — move Own  → Maybe/,   delete Pub
+--all mode
+  Load every image in the folder as a single card (no pairing).
+  The same 5 action buttons work; each acts on that one file only:
+    Save / Civit / Improve / Maybe  -- move file to that sub-folder
+    No                              -- delete the file
+
+Actions in paired mode
+  [Save]    — move Own  to Save/,    delete Pub
+  [Civit]   — move Pub  to Civit/,   also move Own to Save/
+  [Improve] — move Own  to Improve/, delete Pub
+  [Maybe]   — move Own  to Maybe/,   delete Pub
   [No]      — delete both files
 
 Sub-folders are created automatically under the source folder.
+
+Usage:
+    python image_sorter.py            # paired Own/Pub mode
+    python image_sorter.py --all      # all-images mode
 
 Requirements:
     pip install Pillow imagehash
 """
 
 import sys
+import argparse
 import shutil
 import threading
 import tkinter as tk
@@ -192,10 +203,25 @@ def find_pairs(folder: Path, max_dist: int = 10, progress_cb=None):
 
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
+def find_all_images(folder: Path, progress_cb=None):
+    """Return every image in folder as a solo entry (own=path, pub=None)."""
+    files = sorted(
+        p for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXT
+    )
+    total = len(files)
+    for i, p in enumerate(files):
+        if progress_cb:
+            progress_cb(i + 1, total, "Loading images")
+    return [(p, None, p.stem, 0) for p in files]
+
+
 class App(tk.Tk):
-    def __init__(self):
+    def __init__(self, all_mode: bool = False):
         super().__init__()
-        self.title("Image Sorter  —  Own / Pub")
+        self._all_mode = all_mode
+        title_suffix = "  [--all mode]" if all_mode else "  —  Own / Pub"
+        self.title(f"Image Sorter{title_suffix}  —  Own / Pub")
         self.geometry("1280x860")
         self.configure(bg=BG_DARK)
         self.minsize(900, 600)
@@ -289,6 +315,12 @@ class App(tk.Tk):
         tk.Label(bar, text=ih_text, bg=BG_MID, fg=ih_color,
                  font=("Courier New", 8)).pack(side=tk.RIGHT, padx=8)
 
+        # Mode indicator
+        mode_text  = "--all: every image" if self._all_mode else "paired Own/Pub"
+        mode_color = C_ORANGE if self._all_mode else C_TEAL
+        tk.Label(bar, text=mode_text, bg=BG_MID, fg=mode_color,
+                 font=("Courier New", 8, "bold"), padx=6).pack(side=tk.RIGHT, padx=2)
+
         # Legend
         legend = tk.Frame(bar, bg=BG_MID)
         legend.pack(side=tk.RIGHT, padx=10)
@@ -359,6 +391,7 @@ class App(tk.Tk):
 
     def _load_folder(self, folder: Path):
         self._folder = folder
+        all_mode = self._all_mode
         self._done_count = 0
         self._prog_var.set(0)
         self._prog_lbl.set("")
@@ -371,7 +404,10 @@ class App(tk.Tk):
             self.after(0, lambda: self._prog_lbl.set(f"{label}  {cur}/{total}"))
 
         def worker():
-            pairs = find_pairs(folder, max_dist=threshold, progress_cb=prog)
+            if all_mode:
+                pairs = find_all_images(folder, progress_cb=prog)
+            else:
+                pairs = find_pairs(folder, max_dist=threshold, progress_cb=prog)
             self.after(0, lambda: self._render_pairs(pairs))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -385,12 +421,17 @@ class App(tk.Tk):
         self._prog_var.set(100)
         self._prog_lbl.set("")
 
-        matched   = sum(1 for o, p, _, d in pairs if o and p)
-        unmatched = len(pairs) - matched
-        self._counter_var.set(f"{matched} pairs  +  {unmatched} solo")
-        self._status_var.set(
-            f"{matched} matched pair(s),  {unmatched} unmatched  —  "
-            f"click an action button to sort.")
+        if self._all_mode:
+            self._counter_var.set(f"{len(pairs)} images")
+            self._status_var.set(
+                f"{len(pairs)} image(s) loaded  —  click an action button to sort.")
+        else:
+            matched   = sum(1 for o, p, _, d in pairs if o and p)
+            unmatched = len(pairs) - matched
+            self._counter_var.set(f"{matched} pairs  +  {unmatched} solo")
+            self._status_var.set(
+                f"{matched} matched pair(s),  {unmatched} unmatched  —  "
+                f"click an action button to sort.")
 
         for idx, (own, pub, label, dist) in enumerate(pairs):
             r, c = divmod(idx, GRID_COLS)
@@ -429,19 +470,28 @@ class App(tk.Tk):
         # File presence + hash distance
         ind_row = tk.Frame(card, bg=BG_CARD)
         ind_row.pack()
-        own_col = C_GREEN if own else C_RED
-        pub_col = C_GOLD  if pub else C_RED
-        tk.Label(ind_row, text="Own ✓" if own else "Own ✗",
-                 bg=BG_CARD, fg=own_col,
-                 font=("Consolas", 7, "bold"), padx=3).pack(side=tk.LEFT)
-        tk.Label(ind_row, text="Pub ✓" if pub else "Pub ✗",
-                 bg=BG_CARD, fg=pub_col,
-                 font=("Consolas", 7, "bold"), padx=3).pack(side=tk.LEFT)
-        if paired and IMAGEHASH_AVAILABLE:
-            dist_col = C_GREEN if dist <= 4 else C_TEAL if dist <= 10 else C_ORANGE
-            tk.Label(ind_row, text=f"Δ{dist}",
-                     bg=BG_CARD, fg=dist_col,
+        if self._all_mode:
+            file_path = own or pub
+            if file_path:
+                tag = "Own" if "Own" in file_path.stem else                       "Pub" if "Pub" in file_path.stem else "img"
+            else:
+                tag = "img"
+            tk.Label(ind_row, text=tag, bg=BG_CARD, fg=C_TEAL,
                      font=("Consolas", 7, "bold"), padx=3).pack(side=tk.LEFT)
+        else:
+            own_col = C_GREEN if own else C_RED
+            pub_col = C_GOLD  if pub else C_RED
+            tk.Label(ind_row, text="Own ✓" if own else "Own ✗",
+                     bg=BG_CARD, fg=own_col,
+                     font=("Consolas", 7, "bold"), padx=3).pack(side=tk.LEFT)
+            tk.Label(ind_row, text="Pub ✓" if pub else "Pub ✗",
+                     bg=BG_CARD, fg=pub_col,
+                     font=("Consolas", 7, "bold"), padx=3).pack(side=tk.LEFT)
+            if paired and IMAGEHASH_AVAILABLE:
+                dist_col = C_GREEN if dist <= 4 else C_TEAL if dist <= 10 else C_ORANGE
+                tk.Label(ind_row, text=f"Δ{dist}",
+                         bg=BG_CARD, fg=dist_col,
+                         font=("Consolas", 7, "bold"), padx=3).pack(side=tk.LEFT)
 
         # Action buttons
         btn_frame = tk.Frame(card, bg=BG_CARD)
@@ -550,10 +600,20 @@ class App(tk.Tk):
         errors = []
 
         def move_file(src: Optional[Path], dest_folder: str) -> bool:
-            if src is None or not src.exists():
-                return True  # nothing to do
+            """Move src into dest_folder subdir. Returns True on success.
+            None src means file was never part of this pair (skip silently).
+            A missing-but-expected file is flagged as an error."""
+            if src is None:
+                return True          # intentionally absent - skip
+            if not src.exists():
+                errors.append(f"File not found, cannot move: {src.name}")
+                return False
             dest_dir = self._folder / dest_folder
-            dest_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                errors.append(f"Cannot create folder {dest_folder}/: {e}")
+                return False
             dest = dest_dir / src.name
             # Avoid collision
             stem, sfx, n = dest.stem, dest.suffix, 1
@@ -562,36 +622,49 @@ class App(tk.Tk):
                 n += 1
             try:
                 shutil.move(str(src), str(dest))
-                return True
             except Exception as e:
-                errors.append(f"Move failed: {src.name} → {e}")
+                errors.append(f"Move failed: {src.name}: {e}")
                 return False
+            # Verify destination exists (catches silent failures on Windows)
+            if not dest.exists():
+                errors.append(f"Move verification failed: {dest.name} not found after move")
+                return False
+            return True
 
         def delete_file(src: Optional[Path]) -> bool:
             if src is None or not src.exists():
-                return True
+                return True          # None or already gone - fine
             try:
                 src.unlink()
                 return True
             except Exception as e:
-                errors.append(f"Delete failed: {src.name} → {e}")
+                errors.append(f"Delete failed: {src.name}: {e}")
                 return False
 
-        if label == "Save":
-            move_file(own, "Save")
-            delete_file(pub)
+        # --all mode: single file per card — move or delete directly
+        if self._all_mode:
+            single = own or pub
+            if label == "No":
+                delete_file(single)
+            else:
+                move_file(single, label)   # button label matches folder name
+
+        # Paired mode: move first, only delete if move succeeded
+        elif label == "Save":
+            if move_file(own, "Save"):
+                delete_file(pub)
 
         elif label == "Civit":
-            move_file(pub, "Civit")
-            move_file(own, "Save")
+            if move_file(pub, "Civit"):
+                move_file(own, "Save")
 
         elif label == "Improve":
-            move_file(own, "Improve")
-            delete_file(pub)
+            if move_file(own, "Improve"):
+                delete_file(pub)
 
         elif label == "Maybe":
-            move_file(own, "Maybe")
-            delete_file(pub)
+            if move_file(own, "Maybe"):
+                delete_file(pub)
 
         elif label == "No":
             delete_file(own)
@@ -640,4 +713,18 @@ class App(tk.Tk):
 
 # ── entry point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    App().mainloop()
+    parser = argparse.ArgumentParser(description="Image Sorter GUI")
+    parser.add_argument(
+        "--all", dest="all_mode", action="store_true",
+        help="Load all images in the folder (skip Own/Pub pairing)")
+    parser.add_argument(
+        "folder", nargs="?", default=None,
+        help="Optional: open this folder on startup")
+    args = parser.parse_args()
+
+    app = App(all_mode=args.all_mode)
+    if args.folder:
+        p = Path(args.folder)
+        if p.is_dir():
+            app._folder_var.set(str(p))
+    app.mainloop()
