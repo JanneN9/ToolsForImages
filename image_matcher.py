@@ -47,6 +47,24 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
+# ── Windows HiDPI fix ────────────────────────────────────────────────────────
+# Without this, an unaware process on a scaled (125%/150%/200%) display is
+# rendered by Windows at 100% into an off-screen bitmap and then stretched to
+# fit — that stretch is exactly what makes Tkinter's text look blurry/fuzzy.
+# It is NOT a font-choice problem; it happens no matter which font is picked.
+# This must run before the FIRST Tk root is created anywhere in the process,
+# including the temporary root that _resolve_fonts() below creates at import
+# time — so it has to sit here, ahead of every other Tk-touching import.
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()   # older Windows fallback
+        except Exception:
+            pass
+
 try:
     from PIL import Image, ImageTk
     import imagehash
@@ -693,8 +711,9 @@ class App(tk.Tk):
 
         section("ACTIONS")
         for icon, lbl, cmd in [
-            ("📋", "Export list (.txt)",     self._export_txt),
-            ("📂", "Copy originals to dest", self._copy_originals),
+            ("📋", "Export list (.txt)",       self._export_txt),
+            ("📂", "Copy originals to dest",   self._copy_originals),
+            ("🖼", "Copy thumbnails to dest",  self._copy_thumbnails),
         ]:
             tk.Button(parent, text=f"{icon}  {lbl}", command=cmd,
                       bg="#1c1c38", fg=C_TEXT, relief=tk.FLAT,
@@ -1132,6 +1151,65 @@ class App(tk.Tk):
 
         msg = (
             f"Copied {copied} file(s) to:\n{dest_path}\n\n"
+            f"  Exact\\     {counts[1]} file(s)\n"
+            f"  Close\\     {counts[2]} file(s)\n"
+            f"  Fuzzy\\     {counts[3]} file(s)\n"
+            f"  Semantic\\  {counts[4]} file(s)"
+        )
+        if skipped:
+            msg += f"\n\n({skipped} failed)"
+        messagebox.showinfo("Done", msg)
+
+    # ── copy thumbnails ────────────────────────────────────────────────────────
+    def _copy_thumbnails(self):
+        """Copy the matched THUMBNAIL images (not the originals) into
+        dest/Thumbnails/<Phase>/, mirroring the phase folders used by
+        _copy_originals so each pair can be found side by side."""
+        dest = self._dest_dir.get()
+        if not dest:
+            dest = filedialog.askdirectory(title="Select destination")
+            if not dest:
+                return
+            self._dest_dir.set(dest)
+
+        dest_path = Path(dest)
+
+        matched = [e for e in self.entries if e.found]
+        if not matched:
+            messagebox.showinfo("Info", "No matched thumbnails to copy.")
+            return
+
+        # Sub-folders by phase, under a Thumbnails root (kept separate from
+        # the Exact/Close/Fuzzy/Semantic folders that _copy_originals uses).
+        phase_dirs = {
+            1: dest_path / "Thumbnails" / "Exact",
+            2: dest_path / "Thumbnails" / "Close",
+            3: dest_path / "Thumbnails" / "Fuzzy",
+            4: dest_path / "Thumbnails" / "Semantic",
+        }
+        for d in phase_dirs.values():
+            d.mkdir(parents=True, exist_ok=True)
+
+        copied = skipped = 0
+        counts = {1: 0, 2: 0, 3: 0, 4: 0}
+        for e in matched:
+            target_dir = phase_dirs[e.phase]
+            dst = target_dir / e.small_path.name
+            if dst.exists():
+                stem, sfx, ctr = dst.stem, dst.suffix, 1
+                while dst.exists():
+                    dst = target_dir / f"{stem}_{ctr}{sfx}"
+                    ctr += 1
+            try:
+                shutil.copy2(e.small_path, dst)
+                copied += 1
+                counts[e.phase] += 1
+            except Exception as ex:
+                print(f"Copy failed: {e.small_path} -> {ex}")
+                skipped += 1
+
+        msg = (
+            f"Copied {copied} thumbnail(s) to:\n{dest_path / 'Thumbnails'}\n\n"
             f"  Exact\\     {counts[1]} file(s)\n"
             f"  Close\\     {counts[2]} file(s)\n"
             f"  Fuzzy\\     {counts[3]} file(s)\n"
