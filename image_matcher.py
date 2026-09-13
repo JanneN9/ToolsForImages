@@ -185,6 +185,7 @@ class ImageEntry:
     match_dist:  int          = 999
     match_score: float        = 0.0
     phase:       int          = 0
+    pair_label:  str          = ""   # e.g. "0007" — shared by Orig-0007 / Thumb-0007 on copy
 
     @property
     def found(self):
@@ -861,6 +862,7 @@ class App(tk.Tk):
 
     def _done(self, entries):
         self.entries = entries
+        self._assign_pair_labels()
         self._prog_var.set(100)
         p1 = sum(1 for e in entries if e.phase == 1)
         p2 = sum(1 for e in entries if e.phase == 2)
@@ -872,6 +874,24 @@ class App(tk.Tk):
             f"Exact={p1}  Close={p2}  Fuzzy={p3}  Semantic={p4}  Unmatched={nm}")
         self._update_stats()
         self._render_grid(entries)
+
+    def _assign_pair_labels(self):
+        """
+        Give every matched entry a zero-padded pair label (e.g. "0007"),
+        numbered per-phase in a stable (filename) order. Copying originals
+        and thumbnails both use this same label — e.g. Exact/Orig-0007.jpg
+        and Thumbnails/Exact/Thumb-0007.jpg — so with hundreds of images,
+        a pair is one glance/sort away instead of a filename hunt.
+        """
+        by_phase = {}
+        for e in self.entries:
+            if e.found:
+                by_phase.setdefault(e.phase, []).append(e)
+        for group in by_phase.values():
+            group.sort(key=lambda e: e.small_path.name)
+            pad = max(4, len(str(len(group))))
+            for i, e in enumerate(group, start=1):
+                e.pair_label = str(i).zfill(pad)
 
     # ── grid ─────────────────────────────────────────────────────────────────
     def _clear_grid(self):
@@ -962,6 +982,7 @@ class App(tk.Tk):
                 f"STATUS  : {entry.phase_label}  (phase {entry.phase})",
                 f"SCORE   : {entry.match_score:.1f}%",
                 dist_line,
+                f"PAIR ID : {entry.pair_label}  (Orig-{entry.pair_label} / Thumb-{entry.pair_label} on copy)",
                 "",
                 "ORIGINAL",
                 f"  {entry.match_path.name}",
@@ -1121,6 +1142,8 @@ class App(tk.Tk):
             messagebox.showinfo("Info", "No matched originals to copy.")
             return
 
+        self._assign_pair_labels()
+
         # Sub-folders by phase
         phase_dirs = {
             1: dest_path / "Exact",
@@ -1135,7 +1158,7 @@ class App(tk.Tk):
         counts = {1: 0, 2: 0, 3: 0, 4: 0}
         for e in matched:
             target_dir = phase_dirs[e.phase]
-            dst = target_dir / e.match_path.name
+            dst = target_dir / f"Orig-{e.pair_label}{e.match_path.suffix.lower()}"
             if dst.exists():
                 stem, sfx, ctr = dst.stem, dst.suffix, 1
                 while dst.exists():
@@ -1179,6 +1202,8 @@ class App(tk.Tk):
             messagebox.showinfo("Info", "No matched thumbnails to copy.")
             return
 
+        self._assign_pair_labels()
+
         # Sub-folders by phase, under a Thumbnails root (kept separate from
         # the Exact/Close/Fuzzy/Semantic folders that _copy_originals uses).
         phase_dirs = {
@@ -1194,7 +1219,7 @@ class App(tk.Tk):
         counts = {1: 0, 2: 0, 3: 0, 4: 0}
         for e in matched:
             target_dir = phase_dirs[e.phase]
-            dst = target_dir / e.small_path.name
+            dst = target_dir / f"Thumb-{e.pair_label}{e.small_path.suffix.lower()}"
             if dst.exists():
                 stem, sfx, ctr = dst.stem, dst.suffix, 1
                 while dst.exists():
