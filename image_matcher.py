@@ -1222,4 +1222,44 @@ class App(tk.Tk):
 
 # ── entry point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    App().mainloop()
+    app = App()
+
+    # ── font-rendering diagnostics ──────────────────────────────────────────
+    # Printed once at startup. "Blurry/hard to read despite installed fonts"
+    # on Linux is almost always the Tk *font system* being "core" instead of
+    # "xft" — i.e. this Python's Tcl/Tk was built without anti-aliasing/
+    # hinting support at all, which no installed font can fix. That happens
+    # when Python comes from pyenv/conda/a from-source build made without
+    # libxft-dev present, rather than the distro's own python3-tk package.
+    try:
+        fontsystem = app.tk.call("tk", "pkgconfig", "get", "fontsystem")
+    except Exception:
+        fontsystem = "unknown"
+    try:
+        tk_scaling = app.tk.call("tk", "scaling")
+    except Exception:
+        tk_scaling = "unknown"
+    try:
+        windowing = app.tk.call("tk", "windowingsystem")
+    except Exception:
+        windowing = "unknown"
+
+    print("── image_matcher font diagnostics ──────────────────────────────")
+    print(f"  Python executable : {sys.executable}")
+    print(f"  Tcl/Tk version    : {app.tk.call('info', 'patchlevel')}")
+    print(f"  Windowing system  : {windowing}")
+    print(f"  Tk font system    : {fontsystem}   (want: xft)")
+    print(f"  Tk scaling factor : {tk_scaling}   (points→pixels; ~1.33 = standard 96 DPI)")
+    if fontsystem != "xft":
+        print("  -> PROBLEM FOUND: Tk font system is not 'xft', so text is drawn with no")
+        print("     anti-aliasing or hinting at all — this alone causes jagged/blurry text")
+        print("     regardless of which font family is installed.")
+        print("     Fix: use the distro's own Python/Tk instead of this one:")
+        print("       sudo apt install python3-tk")
+        print("       python3 image_matcher.py     # run with system python3, not a venv")
+        print("                                     # built from a pyenv/conda Python")
+        print("     If you must keep a custom-built Python, rebuild it after:")
+        print("       sudo apt install tk-dev libxft-dev")
+    print("───────────────────────────────────────────────────────────────")
+
+    app.mainloop()
