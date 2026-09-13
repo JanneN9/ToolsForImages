@@ -1,26 +1,38 @@
 #!/usr/bin/env python3
 """
-Image Matcher GUI  —  Tiered 3-Phase Matching
+Image Matcher GUI  —  Tiered 4-Phase Matching
 ----------------------------------------------
 Designed for the real-world case where many similar originals exist and
 one was selected/cropped/resized for publishing.
 
-THREE PHASES (run in sequence or all at once):
-  Phase 1 — EXACT  : pHash distance 0  (truly identical content, 100%)
-  Phase 2 — CLOSE  : pHash distance 1-6  (same shot, minor re-save/crop)
-  Phase 3 — FUZZY  : pHash distance 7-N  (similar composition, slider controls N)
+FOUR PHASES (run in sequence or all at once):
+  Phase 1 — EXACT    : pHash distance 0  (truly identical content, 100%)
+  Phase 2 — CLOSE    : pHash distance 1-6  (same shot, minor re-save/crop)
+  Phase 3 — FUZZY    : ORB feature matching  (same shot, cropped/rescaled)
+  Phase 4 — SEMANTIC : CLIP embedding cosine similarity  (same scene/subject/
+                        composition, but different pixels entirely — e.g. a
+                        different render or re-shoot of "the same idea")
 
-Unmatched images from Phase 1 are passed to Phase 2, then to Phase 3.
-Already-matched images are never re-processed in later phases.
+Unmatched images from Phase 1 are passed to Phase 2, then to Phase 3, then
+to Phase 4. Already-matched images are never re-processed in later phases.
+
+Phase 4 exists because hash- and keypoint-based matching (Phases 1-3) can
+only recognize near-duplicates of the *same* source image. They cannot
+tell that two entirely different photos/renders depict "two women facing
+each other in an ornate palace corridor" — that requires a semantic
+embedding, not a pixel/texture comparison.
 
 Card colours:
-  Gold  border  = Phase 1 exact match  (100%)
-  Green border  = Phase 2 close match  (>=90%)
-  Teal  border  = Phase 3 fuzzy match  (slider range)
-  Red   border  = not found
+  Gold    border = Phase 1 exact match     (100%)
+  Green   border = Phase 2 close match     (>=90%)
+  Teal    border = Phase 3 fuzzy match     (ORB, slider controls sensitivity)
+  Purple  border = Phase 4 semantic match  (CLIP, slider controls threshold)
+  Red     border = not found
 
 Requirements:
     pip install Pillow imagehash
+    pip install opencv-python          # optional, enables Phase 3 ORB matching
+    pip install torch open_clip_torch  # optional, enables Phase 4 semantic matching
 
 Usage:
     python image_matcher.py
@@ -49,6 +61,14 @@ try:
     OPENCV_AVAILABLE = True
 except ImportError:
     OPENCV_AVAILABLE = False
+
+# torch + open_clip are optional — used for CLIP semantic matching in Phase 4
+try:
+    import torch
+    import open_clip
+    CLIP_AVAILABLE = True
+except ImportError:
+    CLIP_AVAILABLE = False
 
 
 # ── cross-platform font resolver ──────────────────────────────────────────
@@ -115,10 +135,12 @@ BG_CARD   = "#1a1a30"
 BG_CARD_1 = "#2a220a"
 BG_CARD_2 = "#0a2214"
 BG_CARD_3 = "#072020"
+BG_CARD_4 = "#1c0a2a"
 
 C_GOLD    = "#ffd700"
 C_GREEN   = "#00e676"
 C_TEAL    = "#26c6da"
+C_PURPLE  = "#b388ff"
 C_RED     = "#ff1744"
 C_BLUE    = "#448aff"
 C_TEXT    = "#dde1f0"
@@ -126,10 +148,13 @@ C_DIM     = "#7986a8"
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
 
-PHASE1_MAX = 0       # pHash+dHash distance: exact
-PHASE2_MAX = 6       # pHash+dHash distance: close
-ORB_MIN_MATCHES = 8  # minimum good ORB keypoint matches to count as fuzzy match
-ORB_RESIZE = 800     # resize longest edge to this before ORB (speed vs accuracy)
+PHASE1_MAX = 0        # pHash+dHash distance: exact
+PHASE2_MAX = 6        # pHash+dHash distance: close
+ORB_MIN_MATCHES = 8   # minimum good ORB keypoint matches to count as fuzzy match
+ORB_RESIZE = 800      # resize longest edge to this before ORB (speed vs accuracy)
+CLIP_MODEL_NAME  = "ViT-B-32"
+CLIP_PRETRAINED  = "laion2b_s34b_b79k"
+CLIP_MIN_SIM = 0.85   # minimum cosine similarity to count as semantic match
 
 
 # ── data model ─────────────────────────────────────────────────────────────
@@ -149,15 +174,15 @@ class ImageEntry:
 
     @property
     def border_color(self):
-        return {1: C_GOLD, 2: C_GREEN, 3: C_TEAL}.get(self.phase, C_RED)
+        return {1: C_GOLD, 2: C_GREEN, 3: C_TEAL, 4: C_PURPLE}.get(self.phase, C_RED)
 
     @property
     def bg_color(self):
-        return {1: BG_CARD_1, 2: BG_CARD_2, 3: BG_CARD_3}.get(self.phase, BG_CARD)
+        return {1: BG_CARD_1, 2: BG_CARD_2, 3: BG_CARD_3, 4: BG_CARD_4}.get(self.phase, BG_CARD)
 
     @property
     def phase_label(self):
-        return {1: "EXACT", 2: "CLOSE", 3: "FUZZY"}.get(self.phase, "NONE")
+        return {1: "EXACT", 2: "CLOSE", 3: "FUZZY", 4: "SEMANTIC"}.get(self.phase, "NONE")
 
 
 # ── matching engine ─────────────────────────────────────────────────────────
@@ -237,18 +262,62 @@ def orb_match_score(small_arr, large_arr, min_matches: int = ORB_MIN_MATCHES):
         return 0.0
 
 
-def run_tiered_match(small_list, large_list, orb_min_matches, active_phases=None, progress_cb=None):
+_clip_model_cache = {}
+
+
+def clip_load():
+    """Lazily load and cache the CLIP model + preprocess transform."""
+    if not CLIP_AVAILABLE:
+        return None, None, None
+    if "model" in _clip_model_cache:
+        return (_clip_model_cache["model"], _clip_model_cache["preprocess"],
+                _clip_model_cache["device"])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED)
+    model.eval().to(device)
+    _clip_model_cache.update(model=model, preprocess=preprocess, device=device)
+    return model, preprocess, device
+
+
+def clip_embed(path: Path, model, preprocess, device):
+    """Return an L2-normalized CLIP embedding (numpy array) for an image, or None."""
+    try:
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+        tensor = preprocess(img).unsqueeze(0).to(device)
+        with torch.no_grad():
+            feat = model.encode_image(tensor)
+            feat = feat / feat.norm(dim=-1, keepdim=True)
+        return feat.squeeze(0).cpu().numpy()
+    except Exception:
+        return None
+
+
+def clip_cosine_sim(a, b):
+    """Cosine similarity between two pre-normalized embeddings, as 0-100 score."""
+    if a is None or b is None:
+        return 0.0
+    return round(float(np.dot(a, b)) * 100, 1)
+
+
+def run_tiered_match(small_list, large_list, orb_min_matches, active_phases=None,
+                      progress_cb=None, clip_min_sim=CLIP_MIN_SIM):
     """
-    Phase 1 — Exact : pHash+dHash distance == 0
-    Phase 2 — Close : pHash+dHash distance 1-6
-    Phase 3 — Fuzzy : ORB feature matching (OpenCV) — handles crops/rescales
-                      Falls back to loose pHash if OpenCV not available.
+    Phase 1 — Exact    : pHash+dHash distance == 0
+    Phase 2 — Close    : pHash+dHash distance 1-6
+    Phase 3 — Fuzzy    : ORB feature matching (OpenCV) — handles crops/rescales
+                         Falls back to loose pHash if OpenCV not available.
+    Phase 4 — Semantic : CLIP embedding cosine similarity — handles the same
+                         scene/subject/composition rendered or shot completely
+                         differently (different pixels, same idea).
 
     Each original can only be claimed ONCE (1:1 matching).
     Phase 3 requires a meaningful ORB score (>= 15%) to avoid false positives.
+    Phase 4 requires cosine similarity >= clip_min_sim (default 0.85).
     """
     if active_phases is None:
-        active_phases = [1, 2, 3]
+        active_phases = [1, 2, 3, 4]
 
     # Track which originals have already been claimed (1 original → 1 thumbnail)
     claimed: set = set()
@@ -368,6 +437,47 @@ def run_tiered_match(small_list, large_list, orb_min_matches, active_phases=None
             if progress_cb:
                 progress_cb(n, n, label)
 
+    # ── phase 4: CLIP semantic embedding similarity ────────────────
+    unmatched = [e for e in entries if not e.found]
+    if unmatched and 4 in active_phases and CLIP_AVAILABLE:
+        label = "Phase 4 — Semantic (CLIP)"
+        model, preprocess, device = clip_load()
+
+        remaining_large = [lp for lp, _, _ in large_hashes if lp not in claimed]
+        large_clip = []
+        n = len(remaining_large)
+        for i, lp in enumerate(remaining_large):
+            emb = clip_embed(lp, model, preprocess, device)
+            if emb is not None:
+                large_clip.append((lp, emb))
+            if progress_cb and i % 10 == 0:
+                progress_cb(i, n, "Embedding originals (CLIP)")
+        if progress_cb:
+            progress_cb(n, n, "Embedding originals (CLIP)")
+
+        n = len(unmatched)
+        for i, entry in enumerate(unmatched):
+            small_emb = clip_embed(entry.small_path, model, preprocess, device)
+            best_sim = 0.0
+            best_path = None
+            for lp, lemb in large_clip:
+                if lp in claimed:
+                    continue
+                sim = clip_cosine_sim(small_emb, lemb)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_path = lp
+            if best_path is not None and best_sim >= clip_min_sim * 100:
+                entry.match_path  = best_path
+                entry.match_dist  = -1  # not applicable for CLIP similarity
+                entry.match_score = best_sim
+                entry.phase       = 4
+                claimed.add(best_path)
+            if progress_cb and i % 5 == 0:
+                progress_cb(i, n, label)
+        if progress_cb:
+            progress_cb(n, n, label)
+
     return entries
 
 
@@ -375,7 +485,7 @@ def run_tiered_match(small_list, large_list, orb_min_matches, active_phases=None
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Image Matcher  —  Tiered 3-Phase  (ORB+pHash)")
+        self.title("Image Matcher  —  Tiered 4-Phase  (ORB+pHash+CLIP)")
         self.geometry("1280x860")
         self.configure(bg=BG_DARK)
         self.minsize(960, 640)
@@ -385,7 +495,8 @@ class App(tk.Tk):
         self._cards     = []
         self._filter    = tk.StringVar(value="all")
         self._p3_min_matches = tk.IntVar(value=8)
-        self._run_phases = [tk.BooleanVar(value=True) for _ in range(3)]
+        self._clip_min_sim = tk.DoubleVar(value=CLIP_MIN_SIM)
+        self._run_phases = [tk.BooleanVar(value=True) for _ in range(4)]
         self._selected  = None
 
         self._status_var = tk.StringVar(value="Select folders, choose phases and click Run.")
@@ -458,7 +569,8 @@ class App(tk.Tk):
         pb = tk.Frame(pf, bg=BG_MID)
         pb.pack()
         for i, (lbl, col) in enumerate([
-                ("1 Exact", C_GOLD), ("2 Close", C_GREEN), ("3 Fuzzy", C_TEAL)]):
+                ("1 Exact", C_GOLD), ("2 Close", C_GREEN),
+                ("3 Fuzzy", C_TEAL), ("4 Semantic", C_PURPLE)]):
             tk.Checkbutton(pb, text=lbl, variable=self._run_phases[i],
                            bg=BG_MID, fg=col, selectcolor=BG_DARK,
                            activebackground=BG_MID,
@@ -481,13 +593,35 @@ class App(tk.Tk):
                  highlightthickness=0, length=110, showvalue=False
                  ).pack(side=tk.LEFT)
 
+        # Phase-4 CLIP similarity threshold
+        cf = tk.Frame(bar, bg=BG_MID)
+        cf.pack(side=tk.LEFT, padx=4)
+        tk.Label(cf, text="Phase 4 min similarity:", bg=BG_MID,
+                 fg=C_DIM, font=F["label"]).pack(anchor=tk.W)
+        row3 = tk.Frame(cf, bg=BG_MID)
+        row3.pack()
+        self._clip_sim_lbl = tk.StringVar(value=f"{self._clip_min_sim.get():.2f}")
+        tk.Label(row3, textvariable=self._clip_sim_lbl,
+                 bg=BG_MID, fg=C_PURPLE,
+                 font=F["section"], width=4).pack(side=tk.LEFT)
+        tk.Scale(row3, from_=0.50, to=0.99, resolution=0.01, orient=tk.HORIZONTAL,
+                 variable=self._clip_min_sim,
+                 command=lambda v: self._clip_sim_lbl.set(f"{float(v):.2f}"),
+                 bg=BG_MID, fg=C_TEXT, troughcolor="#222244",
+                 highlightthickness=0, length=110, showvalue=False
+                 ).pack(side=tk.LEFT)
+
         tk.Button(bar, text="▶  RUN",
                   command=self._start,
                   bg=C_BLUE, fg=BG_DARK,
                   font=F["btn_run"],
                   relief=tk.FLAT, padx=18, pady=7,
                   cursor="hand2").pack(side=tk.RIGHT, padx=16)
-        # OpenCV availability indicator
+        # OpenCV / CLIP availability indicators
+        clip_text = "CLIP ✓" if CLIP_AVAILABLE else "CLIP ✗ (pip install torch open_clip_torch)"
+        clip_color = C_GREEN if CLIP_AVAILABLE else C_RED
+        tk.Label(bar, text=clip_text, bg=BG_MID, fg=clip_color,
+                 font=F["label"]).pack(side=tk.RIGHT, padx=6)
         cv_text = "OpenCV ✓" if OPENCV_AVAILABLE else "OpenCV ✗ (pip install opencv-python)"
         cv_color = C_GREEN if OPENCV_AVAILABLE else C_RED
         tk.Label(bar, text=cv_text, bg=BG_MID, fg=cv_color,
@@ -515,10 +649,11 @@ class App(tk.Tk):
 
         section("LEGEND")
         for col, lbl in [
-            (C_GOLD,  "Phase 1 — Exact  (100%)"),
-            (C_GREEN, "Phase 2 — Close  (>=90%)"),
-            (C_TEAL,  "Phase 3 — Fuzzy  (ORB features)"),
-            (C_RED,   "Not matched"),
+            (C_GOLD,   "Phase 1 — Exact     (100%)"),
+            (C_GREEN,  "Phase 2 — Close     (>=90%)"),
+            (C_TEAL,   "Phase 3 — Fuzzy     (ORB features)"),
+            (C_PURPLE, "Phase 4 — Semantic  (CLIP)"),
+            (C_RED,    "Not matched"),
         ]:
             row = tk.Frame(parent, bg=BG_MID)
             row.pack(anchor=tk.W, padx=12, pady=1)
@@ -533,6 +668,7 @@ class App(tk.Tk):
             ("p1",       "Exact (gold)"),
             ("p2",       "Close (green)"),
             ("p3",       "Fuzzy (teal)"),
+            ("p4",       "Semantic (purple)"),
             ("notfound", "Not found (red)"),
         ]:
             tk.Radiobutton(parent, text=lbl,
@@ -666,14 +802,22 @@ class App(tk.Tk):
             messagebox.showerror("Error", "Originals folder not found.")
             return
 
-        active = [i+1 for i in range(3) if self._run_phases[i].get()]
+        active = [i+1 for i in range(4) if self._run_phases[i].get()]
         if not active:
             messagebox.showwarning("No phases", "Enable at least one phase.")
             return
 
+        if 4 in active and not CLIP_AVAILABLE:
+            messagebox.showwarning(
+                "CLIP not installed",
+                "Phase 4 (Semantic) needs torch + open_clip_torch.\n"
+                "Install with:  pip install torch open_clip_torch\n\n"
+                "Continuing without Phase 4.")
+
         self._clear_grid()
         self._prog_var.set(0)
         orb_min = self._p3_min_matches.get()
+        clip_min_sim = self._clip_min_sim.get()
 
         def worker():
             self.after(0, lambda: self._set_status("Scanning…"))
@@ -690,7 +834,7 @@ class App(tk.Tk):
                 self.after(0, lambda: self._prog_var.set(pct))
                 self.after(0, lambda: self._prog_lbl.set(f"{label}  {cur}/{total}"))
 
-            entries = run_tiered_match(small, large, orb_min, active, prog)
+            entries = run_tiered_match(small, large, orb_min, active, prog, clip_min_sim)
 
             self.after(0, lambda: self._done(entries))
 
@@ -702,10 +846,11 @@ class App(tk.Tk):
         p1 = sum(1 for e in entries if e.phase == 1)
         p2 = sum(1 for e in entries if e.phase == 2)
         p3 = sum(1 for e in entries if e.phase == 3)
-        nm = len(entries) - p1 - p2 - p3
+        p4 = sum(1 for e in entries if e.phase == 4)
+        nm = len(entries) - p1 - p2 - p3 - p4
         self._set_status(
             f"Done  ·  {len(entries)} total  |  "
-            f"Exact={p1}  Close={p2}  Fuzzy={p3}  Unmatched={nm}")
+            f"Exact={p1}  Close={p2}  Fuzzy={p3}  Semantic={p4}  Unmatched={nm}")
         self._update_stats()
         self._render_grid(entries)
 
@@ -792,10 +937,12 @@ class App(tk.Tk):
             "",
         ]
         if entry.found:
+            dist_line = ("DISTANCE: n/a (cosine similarity)" if entry.match_dist < 0
+                         else f"DISTANCE: {entry.match_dist}")
             lines += [
                 f"STATUS  : {entry.phase_label}  (phase {entry.phase})",
                 f"SCORE   : {entry.match_score:.1f}%",
-                f"DISTANCE: {entry.match_dist}",
+                dist_line,
                 "",
                 "ORIGINAL",
                 f"  {entry.match_path.name}",
@@ -871,6 +1018,7 @@ class App(tk.Tk):
             if   mode == "p1"       and entry.phase != 1: show = False
             elif mode == "p2"       and entry.phase != 2: show = False
             elif mode == "p3"       and entry.phase != 3: show = False
+            elif mode == "p4"       and entry.phase != 4: show = False
             elif mode == "notfound" and entry.found:      show = False
             if show: self._cards[i].grid()
             else:    self._cards[i].grid_remove()
@@ -882,13 +1030,15 @@ class App(tk.Tk):
         p1 = sum(1 for x in e if x.phase == 1)
         p2 = sum(1 for x in e if x.phase == 2)
         p3 = sum(1 for x in e if x.phase == 3)
-        nm = n - p1 - p2 - p3
-        avg = (sum(x.match_score for x in e if x.found) / max(p1+p2+p3, 1))
+        p4 = sum(1 for x in e if x.phase == 4)
+        nm = n - p1 - p2 - p3 - p4
+        avg = (sum(x.match_score for x in e if x.found) / max(p1+p2+p3+p4, 1))
         self._stats.config(text=(
             f"Total     : {n}\n"
             f"Phase 1   : {p1}  (exact)\n"
             f"Phase 2   : {p2}  (close)\n"
             f"Phase 3   : {p3}  (fuzzy)\n"
+            f"Phase 4   : {p4}  (semantic)\n"
             f"Unmatched : {nm}\n"
             f"Avg score : {avg:.1f}%"
         ))
@@ -910,6 +1060,7 @@ class App(tk.Tk):
             (1, "PHASE 1 — EXACT"),
             (2, "PHASE 2 — CLOSE"),
             (3, "PHASE 3 — FUZZY"),
+            (4, "PHASE 4 — SEMANTIC"),
         ]:
             group = [e for e in self.entries if e.phase == phase]
             lines += [f"[{label}]  ({len(group)} images)", ""]
@@ -956,12 +1107,13 @@ class App(tk.Tk):
             1: dest_path / "Exact",
             2: dest_path / "Close",
             3: dest_path / "Fuzzy",
+            4: dest_path / "Semantic",
         }
         for d in phase_dirs.values():
             d.mkdir(parents=True, exist_ok=True)
 
         copied = skipped = 0
-        counts = {1: 0, 2: 0, 3: 0}
+        counts = {1: 0, 2: 0, 3: 0, 4: 0}
         for e in matched:
             target_dir = phase_dirs[e.phase]
             dst = target_dir / e.match_path.name
@@ -980,9 +1132,10 @@ class App(tk.Tk):
 
         msg = (
             f"Copied {copied} file(s) to:\n{dest_path}\n\n"
-            f"  Exact\\  {counts[1]} file(s)\n"
-            f"  Close\\  {counts[2]} file(s)\n"
-            f"  Fuzzy\\  {counts[3]} file(s)"
+            f"  Exact\\     {counts[1]} file(s)\n"
+            f"  Close\\     {counts[2]} file(s)\n"
+            f"  Fuzzy\\     {counts[3]} file(s)\n"
+            f"  Semantic\\  {counts[4]} file(s)"
         )
         if skipped:
             msg += f"\n\n({skipped} failed)"
