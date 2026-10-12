@@ -148,6 +148,10 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
 THUMBNAIL_SIZE = (220, 220)
 GRID_COLS      = 3
 
+PREVIEW_THUMB_SIZE = (420, 420)   # double-click preview — bigger than the grid thumbnail
+PREVIEW_COLS_SMALL = 3            # up to 9 images -> 3x3
+PREVIEW_COLS_LARGE = 5            # more than 9 -> 5 wide (e.g. 5x2 for 10), scrolls beyond that
+
 HASH_SIZE      = 8          # imagehash default -> 64-bit hash
 EXACT_MAX      = 0          # Hamming distance: exact
 CLOSE_MAX_DEF  = 6          # Hamming distance: close (slider-adjustable)
@@ -684,7 +688,10 @@ class App(tk.Tk):
             photo = ImageTk.PhotoImage(Image.new("RGB", THUMBNAIL_SIZE, (30, 30, 50)))
         self._photos.append(photo)
 
-        tk.Label(card, image=photo, bg=BG_CARD).pack(padx=6, pady=(6, 2))
+        thumb_lbl = tk.Label(card, image=photo, bg=BG_CARD, cursor="hand2")
+        thumb_lbl.pack(padx=6, pady=(6, 2))
+        for w in (card, thumb_lbl):
+            w.bind("<Double-Button-1>", lambda _e, g=group: self._open_preview(g))
 
         name = info.path.name
         if len(name) > 30:
@@ -705,6 +712,78 @@ class App(tk.Tk):
                   padx=8, cursor="hand2").pack(side=tk.LEFT, padx=3)
 
         return card
+
+    # ── full-size preview (double-click) ────────────────────────────────────
+    def _open_preview(self, group: DupGroup):
+        """Double-click a thumbnail: show every image in the group at a much
+        larger size, side by side, so differences are actually visible. Grid
+        is capped at 3 wide for up to 9 images (3x3) or 5 wide beyond that
+        (e.g. 5x2 for 10) — any more than that just scrolls."""
+        win = tk.Toplevel(self)
+        win.title(f"Group {group.gid}  —  Preview ({len(group.images)} images)")
+        win.configure(bg=BG_DARK)
+        win.geometry("1200x800")
+
+        container = tk.Frame(win, bg=BG_DARK)
+        container.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(container, bg=BG_DARK, highlightthickness=0)
+        vsb = tk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        gframe = tk.Frame(canvas, bg=BG_DARK)
+        cwin = canvas.create_window((0, 0), window=gframe, anchor=tk.NW)
+        gframe.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(cwin, width=e.width))
+
+        def scroll(event):
+            if event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
+            else:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def restore_main_scroll_and_close():
+            # bind_all is process-wide, so give mouse-wheel scrolling back to
+            # the main window's canvas once this preview closes.
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                self._canvas.bind_all(seq, self._scroll)
+            win.destroy()
+
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            canvas.bind_all(seq, scroll)
+        win.protocol("WM_DELETE_WINDOW", restore_main_scroll_and_close)
+
+        photos = []
+        win._photos = photos  # keep references alive for the window's lifetime
+
+        cols = PREVIEW_COLS_SMALL if len(group.images) <= 9 else PREVIEW_COLS_LARGE
+        for idx, info in enumerate(group.images):
+            r, c = divmod(idx, cols)
+            card = tk.Frame(gframe, bg=BG_CARD, highlightbackground=group.color, highlightthickness=2)
+            card.grid(row=r, column=c, padx=8, pady=8, sticky=tk.NSEW)
+
+            try:
+                with Image.open(info.path) as raw:
+                    img = raw.convert("RGB")
+                img.thumbnail(PREVIEW_THUMB_SIZE, Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+            except Exception:
+                photo = ImageTk.PhotoImage(Image.new("RGB", PREVIEW_THUMB_SIZE, (30, 30, 50)))
+            photos.append(photo)
+
+            tk.Label(card, image=photo, bg=BG_CARD).pack(padx=6, pady=(6, 2))
+            tk.Label(card, text=info.path.name, bg=BG_CARD, fg=C_TEXT, font=F["name"]).pack()
+            tk.Label(card, text=str(info.path.parent), bg=BG_CARD, fg=C_DIM,
+                      font=F["label"], wraplength=PREVIEW_THUMB_SIZE[0]).pack()
+            tk.Label(card, text=f"{info.width}×{info.height}  ·  {human_size(info.size_bytes)}",
+                      bg=BG_CARD, fg=C_DIM, font=F["label"]).pack(pady=(0, 6))
+
+        tk.Button(win, text="Close", command=restore_main_scroll_and_close,
+                   bg="#1c1c38", fg=C_TEXT, relief=tk.FLAT, font=F["btn"],
+                   padx=12, pady=4, cursor="hand2").pack(pady=8)
 
     # ── per-image actions ───────────────────────────────────────────────────
     def _remove_from_group(self, group: DupGroup, info: ImageInfo):
