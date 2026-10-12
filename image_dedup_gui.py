@@ -401,6 +401,12 @@ class App(tk.Tk):
         self.groups: List[DupGroup] = []
         self.selected_group: Optional[DupGroup] = None
         self._photos = []
+        self._card_info_map: Dict[tk.Widget, ImageInfo] = {}
+        self._drag_group: Optional[DupGroup] = None
+        self._drag_info: Optional[ImageInfo] = None
+        self._drag_start_xy: Optional[Tuple[int, int]] = None
+        self._drag_started = False
+        self._drag_target_card: Optional[tk.Widget] = None
 
         self._main_dir = tk.StringVar()
         self._move_dir = tk.StringVar()
@@ -663,6 +669,7 @@ class App(tk.Tk):
         for w in self._gframe.winfo_children():
             w.destroy()
         self._photos.clear()
+        self._card_info_map.clear()
 
     def _render_group(self, group: DupGroup):
         self._clear_grid()
@@ -692,6 +699,14 @@ class App(tk.Tk):
         thumb_lbl.pack(padx=6, pady=(6, 2))
         for w in (card, thumb_lbl):
             w.bind("<Double-Button-1>", lambda _e, g=group: self._open_preview(g))
+            # Drag-and-drop reordering: click-drag a card onto another one in
+            # the same group to swap their positions, so you can line up
+            # similar-looking images side by side for easier comparison.
+            w.bind("<ButtonPress-1>", lambda e, g=group, inf=info: self._drag_start(e, g, inf))
+            w.bind("<B1-Motion>", self._drag_motion)
+            w.bind("<ButtonRelease-1>", self._drag_end)
+
+        self._card_info_map[card] = info
 
         name = info.path.name
         if len(name) > 30:
@@ -712,6 +727,85 @@ class App(tk.Tk):
                   padx=8, cursor="hand2").pack(side=tk.LEFT, padx=3)
 
         return card
+
+    # ── drag-and-drop reordering ────────────────────────────────────────────
+    DRAG_THRESHOLD = 6  # pixels of mouse movement before a click counts as a drag
+
+    def _find_card_ancestor(self, widget) -> Optional[tk.Widget]:
+        """Climb from whatever widget is under the pointer (a label, a
+        button, ...) up to its enclosing card, if any."""
+        w = widget
+        while w is not None:
+            if w in self._card_info_map:
+                return w
+            if w is self:
+                return None
+            try:
+                w = w.master
+            except Exception:
+                return None
+        return None
+
+    def _clear_drag_highlight(self):
+        if self._drag_target_card is not None:
+            try:
+                self._drag_target_card.configure(highlightbackground=self.selected_group.color,
+                                                   highlightthickness=2)
+            except Exception:
+                pass
+            self._drag_target_card = None
+
+    def _drag_start(self, event, group: DupGroup, info: ImageInfo):
+        self._drag_group = group
+        self._drag_info = info
+        self._drag_start_xy = (event.x_root, event.y_root)
+        self._drag_started = False
+
+    def _drag_motion(self, event):
+        if self._drag_info is None or self._drag_start_xy is None:
+            return
+        dx = event.x_root - self._drag_start_xy[0]
+        dy = event.y_root - self._drag_start_xy[1]
+        if not self._drag_started:
+            if abs(dx) < self.DRAG_THRESHOLD and abs(dy) < self.DRAG_THRESHOLD:
+                return
+            self._drag_started = True
+            self._canvas.configure(cursor="fleur")
+
+        target_widget = self.winfo_containing(event.x_root, event.y_root)
+        card = self._find_card_ancestor(target_widget)
+        source_card = next((c for c, inf in self._card_info_map.items() if inf is self._drag_info), None)
+        if card is self._drag_target_card:
+            return
+        self._clear_drag_highlight()
+        if card is not None and card is not source_card:
+            card.configure(highlightbackground=C_BLUE, highlightthickness=4)
+            self._drag_target_card = card
+
+    def _drag_end(self, event):
+        self._canvas.configure(cursor="")
+        swap_target = None
+        if self._drag_started and self._drag_info is not None:
+            target_widget = self.winfo_containing(event.x_root, event.y_root)
+            card = self._find_card_ancestor(target_widget)
+            target_info = self._card_info_map.get(card) if card is not None else None
+            if target_info is not None and target_info is not self._drag_info:
+                swap_target = target_info
+        # Clear the highlight before _swap_images re-renders the grid and
+        # destroys the card widget it points at.
+        self._clear_drag_highlight()
+        if swap_target is not None:
+            self._swap_images(self._drag_group, self._drag_info, swap_target)
+        self._drag_group = None
+        self._drag_info = None
+        self._drag_start_xy = None
+        self._drag_started = False
+
+    def _swap_images(self, group: DupGroup, info_a: ImageInfo, info_b: ImageInfo):
+        images = group.images
+        ia, ib = images.index(info_a), images.index(info_b)
+        images[ia], images[ib] = images[ib], images[ia]
+        self._render_group(group)
 
     # ── full-size preview (double-click) ────────────────────────────────────
     def _open_preview(self, group: DupGroup):
