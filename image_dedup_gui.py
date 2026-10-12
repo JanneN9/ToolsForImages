@@ -726,18 +726,27 @@ class App(tk.Tk):
 
         container = tk.Frame(win, bg=BG_DARK)
         container.pack(fill=tk.BOTH, expand=True)
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
         canvas = tk.Canvas(container, bg=BG_DARK, highlightthickness=0)
         vsb = tk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        hsb = tk.Scrollbar(container, orient=tk.HORIZONTAL, command=canvas.xview)
+        canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        canvas.grid(row=0, column=0, sticky=tk.NSEW)
+        vsb.grid(row=0, column=1, sticky=tk.NS)
+        hsb.grid(row=1, column=0, sticky=tk.EW)
 
         gframe = tk.Frame(canvas, bg=BG_DARK)
-        cwin = canvas.create_window((0, 0), window=gframe, anchor=tk.NW)
+        canvas.create_window((0, 0), window=gframe, anchor=tk.NW)
+        # Deliberately NOT forcing gframe's width to the canvas width here
+        # (unlike the main grid) — the whole point is that when the window
+        # is shrunk (e.g. to 880x660) and the cards don't fit, the content
+        # keeps its natural size and a horizontal scrollbar appears instead
+        # of cards getting squeezed.
         gframe.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(cwin, width=e.width))
 
-        def scroll(event):
+        def scroll_y(event):
             if event.num == 4:
                 canvas.yview_scroll(-1, "units")
             elif event.num == 5:
@@ -745,15 +754,43 @@ class App(tk.Tk):
             else:
                 canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
+        def scroll_x(event):
+            if event.num == 6:
+                canvas.xview_scroll(-1, "units")
+            elif event.num == 7:
+                canvas.xview_scroll(1, "units")
+            else:
+                canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+
         def restore_main_scroll_and_close():
             # bind_all is process-wide, so give mouse-wheel scrolling back to
             # the main window's canvas once this preview closes.
             for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                 self._canvas.bind_all(seq, self._scroll)
+            for seq in ("<Shift-MouseWheel>", "<Shift-Button-4>", "<Shift-Button-5>",
+                        "<Button-6>", "<Button-7>"):
+                try:
+                    self._canvas.unbind_all(seq)
+                except tk.TclError:
+                    pass
             win.destroy()
 
+        def safe_bind_all(seq, handler):
+            # Not every Tk build recognizes every sequence (e.g. Button-6/7
+            # for a horizontal wheel raise "bad button number" on some
+            # platforms) — skip whatever isn't supported instead of crashing.
+            try:
+                canvas.bind_all(seq, handler)
+            except tk.TclError:
+                pass
+
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            canvas.bind_all(seq, scroll)
+            safe_bind_all(seq, scroll_y)
+        # Horizontal: Shift+wheel on Windows/Mac, Shift+Button-4/5 on some X11
+        # setups, and dedicated Button-6/7 on others with a horizontal wheel.
+        for seq in ("<Shift-MouseWheel>", "<Shift-Button-4>", "<Shift-Button-5>",
+                    "<Button-6>", "<Button-7>"):
+            safe_bind_all(seq, scroll_x)
         win.protocol("WM_DELETE_WINDOW", restore_main_scroll_and_close)
 
         photos = []
